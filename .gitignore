@@ -22,6 +22,7 @@ certs/*.pem
 
 # Spooling Databases & Local Storage
 *.db
+*.db-*
 *.sqlite
 *.sqlite3
 spool/

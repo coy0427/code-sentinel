@@ -121,7 +121,18 @@ The Docker Compose topology isolates traffic across two distinct networks:
 
 ## 4. Quickstart Guide
 
-### Step 1: Generate PKI Certificates
+### Option A: Single-Command Automated Orchestrator (Recommended)
+Launch the complete end-to-end system (pre-flight checks, certificate generation, Docker services, health checks, and live Edge Agent telemetry) in a single command:
+```bash
+make run
+# Or directly:
+./launch.sh
+```
+Press `Ctrl+C` at any time to gracefully stop the agent and services.
+
+### Option B: Step-by-Step Manual Execution
+
+#### Step 1: Generate PKI Certificates
 ```bash
 make certs
 # Or run directly:
