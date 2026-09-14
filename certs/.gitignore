@@ -1,0 +1,11 @@
+# Ignore private keys, certificates, and OpenSSL serial files
+*.key
+*.crt
+*.csr
+*.srl
+*.pem
+
+# Keep the generation script and gitignore
+!.gitignore
+!generate_certs.sh
+

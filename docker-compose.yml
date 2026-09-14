@@ -1,0 +1,55 @@
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: secureedge-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: telemetry_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secure_postgres_password
+    volumes:
+      - /home/coy/.docker_volumes/timescale_data:/var/lib/postgresql/data
+    tmpfs:
+      - /var/run/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d telemetry_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - backend-net
+
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    container_name: secureedge-gateway
+    restart: unless-stopped
+    ports:
+      - "8443:8443"
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+asyncpg://postgres:secure_postgres_password@timescaledb:5432/telemetry_db
+      SSL_CA_CERT: /app/certs/ca.crt
+      SSL_SERVER_CERT: /app/certs/server.crt
+      SSL_SERVER_KEY: /app/certs/server.key
+      RATE_LIMIT_REQUESTS: 200
+      RATE_LIMIT_WINDOW_SECONDS: 60
+      MAX_BATCH_SIZE: 500
+      LOG_LEVEL: INFO
+    volumes:
+      - ./certs:/app/certs:ro
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    networks:
+      - edge-net
+      - backend-net
+
+networks:
+  edge-net:
+    driver: bridge
+  backend-net:
+    driver: bridge
+    internal: true

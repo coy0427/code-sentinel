@@ -1,0 +1,239 @@
+# Secure Edge IoT & Telemetry Ingestion Engine
+
+[![CI Pipeline](https://github.com/organization/secure-edge-iot/actions/workflows/ci.yml/badge.svg)](https://github.com/organization/secure-edge-iot/actions)
+[![Python Version](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.110+-009688.svg)](https://fastapi.tiangolo.com/)
+[![TimescaleDB](https://img.shields.io/badge/TimescaleDB-PostgreSQL%2016-orange.svg)](https://www.timescale.com/)
+[![Security: mTLS](https://img.shields.io/badge/Security-mTLS%20X.509-red.svg)](#security-architecture)
+
+A high-reliability, zero-loss telemetry ingestion platform tailored for industrial edge IoT operations. Features mutual TLS (mTLS) cryptographic client authentication, an asynchronous edge producer agent with persistent offline SQLite spooling and exponential backoff, a high-throughput FastAPI gateway API, and auto-partitioned TimescaleDB hypertables.
+
+---
+
+## 1. System Architecture
+
+```
++-------------------------------------------------------------------------+
+|                        Industrial Edge Device                           |
+|                                                                         |
+|  +--------------------+        +-------------------------------------+  |
+|  |   SensorEmulator   | -----> |      SpoolingBuffer (SQLite)        |  |
+|  | (Physically Bounded|        |    (Persistent WAL Queue, Zero-     |  |
+|  |  Industrial Drift) |        |       Data-Loss Guarantee)          |  |
+|  +--------------------+        +------------------+------------------+  |
+|                                                   |                     |
+|                                        +----------v----------+          |
+|                                        |   EdgeAgentClient   |          |
+|                                        |  (httpx Async mTLS) |          |
++----------------------------------------+----------+----------+----------+
+                                                    |
+                                                    |  mTLS (TLS 1.3 / X.509)
+                                                    |  Client & Server Certs
+                                                    |  Port 8443
+                                                    v
++-------------------------------------------------------------------------+
+|                    Secure Ingestion Gateway (Docker)                    |
+|                                                                         |
+|  [edge-net] Network Ingress                                             |
+|                                                                         |
+|  +-------------------------------------------------------------------+  |
+|  |                 FastAPI Application (Uvicorn mTLS)                |  |
+|  |                                                                   |  |
+|  |  - TLS Handshake & Client Cert Verification (OpenSSL CA Trust)   |  |
+|  |  - Sliding-Window Rate Limiting Middleware (HTTP 429)            |  |
+|  |  - Structured RFC-Compliant JSON Access Logging                  |  |
+|  |  - Pydantic V2 Strict Input Sanitization & Validation             |  |
+|  +-----------------------------------+-------------------------------+  |
+|                                      |                                  |
+|                                      |  SQLAlchemy 2.0 Async (asyncpg)  |
+|                                      |  Pooled Connections              |
+|                                      v                                  |
++-------------------------------------------------------------------------+
+                                       |
+                                       | [backend-net] (Strictly Isolated)
+                                       v
++-------------------------------------------------------------------------+
+|                 TimescaleDB / PostgreSQL 16 (Docker)                    |
+|                                                                         |
+|  - Hypertables partitioned on `timestamp`                               |
+|  - Composite indexes on `(device_id, timestamp DESC)`                   |
+|  - Microsecond-resolution time-series aggregation                       |
++-------------------------------------------------------------------------+
+```
+
+---
+
+## 2. Directory Structure
+
+```
+.
+├── .env.example                # Sample environment configuration
+├── .gitignore                  # Git ignore patterns
+├── Makefile                    # DevOps automation targets (certs, build, up, test)
+├── README.md                   # System architecture and deployment manual
+├── docker-compose.yml          # Container orchestration with dual isolated networks
+├── pyproject.toml              # Build metadata and dependency specifications
+├── .github/
+│   └── workflows/
+│       └── ci.yml              # GitHub Actions CI matrix pipeline (Ruff + Pytest)
+├── certs/
+│   ├── .gitignore              # Ignores sensitive private keys and certs
+│   └── generate_certs.sh       # Robust OpenSSL PKI generator for mTLS
+├── edge_agent/
+│   ├── __init__.py
+│   ├── client.py               # Async httpx mTLS client & persistent SQLite spooler
+│   └── sensor_emulator.py      # Physically bounded industrial telemetry generator
+├── gateway/
+│   ├── Dockerfile              # Multi-stage hardened non-root container build
+│   └── app/
+│       ├── __init__.py
+│       ├── config.py           # Pydantic Settings configuration
+│       ├── database.py         # SQLAlchemy asyncpg engine & TimescaleDB hypertable setup
+│       ├── main.py             # FastAPI entrypoint, endpoints, and lifespan
+│       ├── models.py           # SQLAlchemy ORM models & strict Pydantic V2 schemas
+│       └── security.py         # Rate limiter, JSON logging, and TLS security
+└── tests/
+    ├── test_agent.py           # Offline spooling, replay, physics, and backoff tests
+    └── test_gateway.py         # Pydantic validation, healthcheck, ingestion & stats tests
+```
+
+---
+
+## 3. Security Architecture & mTLS
+
+### Mutual TLS (mTLS) Authentication
+- **Dedicated Root CA**: Private key `ca.key` (4096-bit RSA) and Root certificate `ca.crt`.
+- **Gateway Server Certificate**: Generated with Subject Alternative Names (`SAN`):
+  - `DNS:localhost`
+  - `DNS:gateway`
+  - `DNS:gateway.secureedge.local`
+  - `IP:127.0.0.1`
+  - `IP:0.0.0.0`
+- **Edge Device Certificate**: Generated with `CN=edge-sensor-01` and `clientAuth` extended key usage.
+- **Strict Verification**: Uvicorn terminates TLS using `--ssl-cert-reqs 2` (`ssl.CERT_REQUIRED`). Connections without a certificate signed by the Root CA are terminated at the TLS handshake level before reaching application code.
+
+### Network Segmentation
+The Docker Compose topology isolates traffic across two distinct networks:
+1. `edge-net`: Ingress network exposed on host port `8443` for edge sensors.
+2. `backend-net`: Strictly isolated (`internal: true`). TimescaleDB does not publish ports to the host and is reachable solely by the gateway container.
+
+---
+
+## 4. Quickstart Guide
+
+### Step 1: Generate PKI Certificates
+```bash
+make certs
+# Or run directly:
+chmod +x certs/generate_certs.sh
+./certs/generate_certs.sh
+```
+
+### Step 2: Local Python Environment Setup
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e ".[dev]"
+```
+
+### Step 3: Run the Test Suite
+```bash
+make test
+# Or run with pytest:
+pytest -v tests/
+```
+
+### Step 4: Run Static Code Analysis & Linter
+```bash
+make lint
+# Or run ruff directly:
+ruff check .
+```
+
+### Step 5: Launch Services via Docker Compose
+```bash
+make build
+make up
+```
+Check health:
+```bash
+curl -k --cert certs/client.crt --key certs/client.key --cacert certs/ca.crt https://localhost:8443/health
+```
+
+---
+
+## 5. API Reference
+
+### `GET /health`
+Returns service uptime and active database ping status.
+
+**Response (`200 OK`)**:
+```json
+{
+  "status": "healthy",
+  "database": "connected",
+  "uptime_seconds": 124.58,
+  "server_time": "2026-09-13T21:40:00.123456Z"
+}
+```
+
+### `POST /api/v1/telemetry`
+Ingests a batch of 1 to 500 validated telemetry readings.
+
+**Request Payload**:
+```json
+{
+  "readings": [
+    {
+      "device_id": "edge-sensor-01",
+      "timestamp": "2026-09-13T21:39:55Z",
+      "temperature": 45.2,
+      "pressure": 6.25,
+      "vibration": 2.14,
+      "voltage": 24.05
+    }
+  ]
+}
+```
+
+**Response (`201 Created`)**:
+```json
+{
+  "status": "success",
+  "accepted_count": 1,
+  "ingested_at": "2026-09-13T21:40:00.250123Z"
+}
+```
+
+### `GET /api/v1/telemetry/stats`
+Retrieves min/max/average statistics per device. Supports query filter `?device_id=edge-sensor-01`.
+
+**Response (`200 OK`)**:
+```json
+[
+  {
+    "device_id": "edge-sensor-01",
+    "reading_count": 50,
+    "temperature": { "min": 41.2, "max": 48.9, "avg": 45.1 },
+    "pressure": { "min": 5.8, "max": 6.8, "avg": 6.24 },
+    "vibration": { "min": 1.5, "max": 3.4, "avg": 2.21 },
+    "voltage": { "min": 23.8, "max": 24.2, "avg": 24.01 },
+    "first_timestamp": "2026-09-13T21:00:00Z",
+    "last_timestamp": "2026-09-13T21:40:00Z"
+  }
+]
+```
+
+---
+
+## 6. Edge Agent Spooling & Zero-Data-Loss Verification
+
+The Edge Agent features an offline persistent buffer:
+1. Telemetry readings are sampled and immediately committed into an ACID-compliant local SQLite table (`telemetry_spool`) with Write-Ahead Logging (WAL).
+2. The asynchronous transmission worker attempts to send batches over mTLS.
+3. If the gateway or network fails (e.g. timeout, connection refused, 5xx error):
+   - Leased records are safely requeued to `PENDING`.
+   - `retry_count` is incremented.
+   - Exponential backoff with random jitter is applied.
+4. When connection is restored, the spooler flushes and drains all accumulated readings in order, guaranteeing zero telemetry loss.
+
